@@ -6,7 +6,6 @@ import base64
 
 from ocr.tesseract_ocr import (
     extract_boxes_and_text,
-    group_boxes_into_bubbles,
     overlay_translations
 )
 from translation.translator import translate_text
