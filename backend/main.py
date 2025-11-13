@@ -6,7 +6,9 @@ import base64
 
 from ocr.tesseract_ocr import (
     extract_boxes_and_text,
-    overlay_translations
+    group_boxes_into_bubbles,
+    overlay_translations_multi_bubble,
+    debug_overlay_bubbles
 )
 from translation.translator import translate_text
 
@@ -25,9 +27,10 @@ app.add_middleware(
 async def translate_image(
     file: UploadFile = File(...),
     source_lang: str = Form("japanese"),
-    target_lang: str = Form("english")
+    target_lang: str = Form("english"),
+    debug: bool = Form(False)
 ):
-    """Translate manga image"""
+    """Translate manga image with multi-bubble support"""
     try:
         image_bytes = await file.read()
         
@@ -40,14 +43,49 @@ async def translate_image(
                 content={"status": "error", "error": "No text detected in image"}
             )
         
-        # Extract original text
-        original_text = " ".join([item["word"] for item in boxes_and_text])
+        # Group boxes into separate speech bubbles
+        bubbles = group_boxes_into_bubbles(boxes_and_text)
         
-        # Translate the extracted text
-        translated_text = translate_text(original_text, source_lang, target_lang)
+        if not bubbles:
+            return JSONResponse(
+                status_code=400,
+                content={"status": "error", "error": "Could not group text into bubbles"}
+            )
         
-        # Overlay translation on image
-        result_image = overlay_translations(np_img_bgr, boxes_and_text, translated_text)
+        # If debug mode, return image with bubble boundaries highlighted
+        if debug:
+            debug_image = debug_overlay_bubbles(np_img_bgr, bubbles)
+            _, buffer = cv2.imencode('.png', debug_image)
+            image_base64 = base64.b64encode(buffer).decode('utf-8')
+            
+            bubble_texts = []
+            for i, bubble in enumerate(bubbles):
+                text = " ".join([item["word"] for item in bubble])
+                bubble_texts.append({"bubble_id": i + 1, "text": text})
+            
+            return {
+                "status": "success",
+                "debug_mode": True,
+                "bubbles_detected": len(bubbles),
+                "bubble_texts": bubble_texts,
+                "image_base64": image_base64
+            }
+        
+        # Translate each bubble separately
+        translations = []
+        original_texts = []
+        
+        for bubble in bubbles:
+            # Combine text from all boxes in this bubble
+            bubble_text = " ".join([item["word"] for item in bubble])
+            original_texts.append(bubble_text)
+            
+            # Translate this bubble's text
+            translated = translate_text(bubble_text, source_lang, target_lang)
+            translations.append(translated)
+        
+        # Overlay all translations on the image
+        result_image = overlay_translations_multi_bubble(np_img_bgr, bubbles, translations)
         
         # Convert result image to base64
         _, buffer = cv2.imencode('.png', result_image)
@@ -55,20 +93,38 @@ async def translate_image(
         
         return {
             "status": "success",
-            "original_text": original_text,
-            "translated_text": translated_text,
+            "bubbles_count": len(bubbles),
+            "original_texts": original_texts,
+            "translated_texts": translations,
             "image_base64": image_base64
         }
     
     except Exception as e:
+        import traceback
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "error": str(e)}
+            content={
+                "status": "error", 
+                "error": str(e),
+                "traceback": traceback.format_exc()
+            }
         )
 
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "service": "manga-translator"}
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Manga Translator API",
+        "version": "2.0 - Multi-Bubble Support",
+        "endpoints": {
+            "translate": "/translate/",
+            "docs": "/docs",
+            "health": "/health"
+        }
+    }
 
 if __name__ == "__main__":
     import uvicorn

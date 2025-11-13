@@ -35,207 +35,207 @@ def extract_boxes_and_text(image_bytes: bytes, lang_key: str):
 
     return np_img_bgr, boxes_and_text
 
-def detect_bubble_boundaries(boxes_and_text, image_np):
-    """Detect the overall bubble boundary by finding white/light areas around text"""
+
+def group_boxes_into_bubbles(boxes_and_text, distance_threshold=80, min_samples=1):
+    """Group OCR boxes into speech bubbles using spatial clustering."""
     if not boxes_and_text:
+        return []
+    
+    # Use the center of each box for clustering
+    centers = [
+        (box["box"][0] + box["box"][2] // 2, box["box"][1] + box["box"][3] // 2) 
+        for box in boxes_and_text
+    ]
+    X = np.array(centers)
+    
+    # Use DBSCAN clustering to group nearby text boxes
+    clustering = DBSCAN(eps=distance_threshold, min_samples=min_samples).fit(X)
+    labels = clustering.labels_
+    
+    # Group boxes by cluster label
+    bubbles = []
+    for label in set(labels):
+        if label == -1:  # Skip noise points
+            continue
+        group = [boxes_and_text[i] for i, l in enumerate(labels) if l == label]
+        if group:
+            bubbles.append(group)
+    
+    return bubbles
+
+
+def get_bubble_boundary(bubble_boxes, image_shape, padding=30):
+    """Calculate the bounding box for a group of text boxes."""
+    if not bubble_boxes:
         return None
     
-    # Convert BGR to grayscale for better bubble detection
-    gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
-    image_shape = image_np.shape
+    min_x = min(box["box"][0] for box in bubble_boxes)
+    min_y = min(box["box"][1] for box in bubble_boxes)
+    max_x = max(box["box"][0] + box["box"][2] for box in bubble_boxes)
+    max_y = max(box["box"][1] + box["box"][3] for box in bubble_boxes)
     
-    # Find the bounding box that encompasses all text
-    min_x = min(box["box"][0] for box in boxes_and_text)
-    min_y = min(box["box"][1] for box in boxes_and_text)
-    max_x = max(box["box"][0] + box["box"][2] for box in boxes_and_text)
-    max_y = max(box["box"][1] + box["box"][3] for box in boxes_and_text)
+    # Add padding
+    x = max(0, min_x - padding)
+    y = max(0, min_y - padding)
+    w = min(image_shape[1] - x, max_x - min_x + 2 * padding)
+    h = min(image_shape[0] - y, max_y - min_y + 2 * padding)
     
-    # Expand search area around text (make it larger)
-    search_padding = 80  # Increased from 50
-    search_x1 = max(0, min_x - search_padding)
-    search_y1 = max(0, min_y - search_padding)
-    search_x2 = min(image_shape[1], max_x + search_padding)
-    search_y2 = min(image_shape[0], max_y + search_padding)
-    
-    # Extract the search region
-    search_region = gray[search_y1:search_y2, search_x1:search_x2]
-    
-    # Try multiple threshold values to detect different bubble colors
-    thresholds = [180, 200, 220, 240]  # Different brightness levels
-    
-    for threshold in thresholds:
-        # Threshold to find light areas (bubble background)
-        _, thresh = cv2.threshold(search_region, threshold, 255, cv2.THRESH_BINARY)
-        
-        # Find contours of light areas
-        contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        if contours:
-            # Find the largest light area (likely the bubble)
-            largest_contour = max(contours, key=cv2.contourArea)
-            contour_area = cv2.contourArea(largest_contour)
-            
-            # Only use if the contour is reasonably large
-            if contour_area > 1000:  # Minimum area threshold
-                # Get bounding rectangle of the bubble
-                x, y, w, h = cv2.boundingRect(largest_contour)
-                
-                # Adjust coordinates back to original image space
-                bubble_x = search_x1 + x
-                bubble_y = search_y1 + y
-                bubble_w = w
-                bubble_h = h
-                
-                return (bubble_x, bubble_y, bubble_w, bubble_h)
-    
-    # Fallback: use text bounding box with larger padding
-    padding = 50  # Increased from 30
-    bubble_x = max(0, min_x - padding)
-    bubble_y = max(0, min_y - padding)
-    bubble_w = min(image_shape[1] - bubble_x, max_x - min_x + 2 * padding)
-    bubble_h = min(image_shape[0] - bubble_y, max_y - min_y + 2 * padding)
-    
-    return (bubble_x, bubble_y, bubble_w, bubble_h)
+    return (x, y, w, h)
 
-def justify_text_line(text, target_width, font_scale, thickness):
-    """Calculate character spacing to justify text across target width"""
-    if len(text) <= 1:
-        return text
+
+def detect_bubble_mask(image_np, bubble_boundary):
+    """Detect light/white areas (speech bubble background) within the boundary."""
+    x, y, w, h = bubble_boundary
     
-    # Get text width
-    (text_width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    # Extract region of interest
+    roi = image_np[y:y+h, x:x+w]
+    gray_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     
-    if text_width >= target_width:
-        return text  # Can't justify if text is too wide
+    # Threshold to find light areas (typical speech bubble backgrounds)
+    _, mask = cv2.threshold(gray_roi, 200, 255, cv2.THRESH_BINARY)
     
-    # Calculate spacing needed
-    total_spacing = target_width - text_width
-    spaces_needed = len(text) - 1
+    # Apply morphological operations to clean up the mask
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     
-    if spaces_needed == 0:
-        return text
+    return mask
+
+
+def draw_text_in_bubble(image, bubble_boundary, text, font_scale=0.6, color=(0, 0, 0)):
+    """Draw text centered in a bubble with proper wrapping."""
+    x, y, w, h = bubble_boundary
     
-    # Use a more conservative spacing approach
-    spacing_per_char = min(total_spacing / spaces_needed, 3)  # Limit max spacing
+    # Calculate max characters per line based on bubble width
+    avg_char_width = 12  # Approximate width per character
+    max_chars = max(10, int(w / avg_char_width))
     
-    # Create justified text with controlled spacing
-    justified_text = ""
-    for i, char in enumerate(text):
-        justified_text += char
-        if i < len(text) - 1:  # Don't add spacing after last character
-            # Add a small fixed amount of spacing
-            justified_text += " "
+    # Wrap text
+    lines = textwrap.wrap(text, width=max_chars)
     
-    return justified_text
+    # Calculate line height
+    line_height = 25
+    total_text_height = len(lines) * line_height
+    
+    # Calculate starting Y position (center vertically)
+    start_y = y + (h - total_text_height) // 2 + line_height
+    
+    # Draw each line centered horizontally
+    for i, line in enumerate(lines):
+        # Get text size
+        (text_width, text_height), baseline = cv2.getTextSize(
+            line, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1
+        )
+        
+        # Center horizontally
+        text_x = x + (w - text_width) // 2
+        text_y = start_y + i * line_height
+        
+        # Draw text shadow for better readability
+        cv2.putText(
+            image, line, (text_x + 1, text_y + 1),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (180, 180, 180), 1, cv2.LINE_AA
+        )
+        
+        # Draw main text
+        cv2.putText(
+            image, line, (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 1, cv2.LINE_AA
+        )
+
+
+def overlay_translations_multi_bubble(image_np, bubbles, translations):
+    """
+    Overlay translations for multiple bubbles.
+    
+    Args:
+        image_np: Original image
+        bubbles: List of bubble groups (each is a list of text boxes)
+        translations: List of translated text strings (one per bubble)
+    """
+    output_img = image_np.copy()
+    h, w = output_img.shape[:2]
+    
+    if len(bubbles) != len(translations):
+        print(f"Warning: {len(bubbles)} bubbles but {len(translations)} translations")
+        translations = translations[:len(bubbles)]  # Truncate if needed
+    
+    for bubble_boxes, translation in zip(bubbles, translations):
+        # Get bubble boundary
+        boundary = get_bubble_boundary(bubble_boxes, output_img.shape)
+        if not boundary:
+            continue
+        
+        x, y, w, h = boundary
+        
+        # White out the original text area
+        cv2.rectangle(output_img, (x, y), (x + w, y + h), (255, 255, 255), -1)
+        
+        # Draw border
+        cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 0, 0), 2)
+        
+        # Draw translated text
+        draw_text_in_bubble(output_img, boundary, translation)
+    
+    return output_img
+
 
 def overlay_translations(image_np, boxes_and_text, full_translation):
-    # Ensure full_translation is a string
+    """
+    Original single-bubble overlay function (kept for backward compatibility).
+    For better results, use overlay_translations_multi_bubble with grouped bubbles.
+    """
     if not isinstance(full_translation, str):
         full_translation = str(full_translation) if full_translation is not None else "[Translation error]"
     
-    # Limit translation length
     if len(full_translation) > 500:
         full_translation = full_translation[:500] + "..."
     
     output_img = image_np.copy()
     h, w = output_img.shape[:2]
 
-    # Check image dimensions
-    if h < 50 or w < 50:
-        return {"error": "Image too small"}
-    if h > 4000 or w > 4000:
-        return {"error": "Image too large"}
-
-    # Detect the original bubble boundary
-    bubble_boundary = detect_bubble_boundaries(boxes_and_text, image_np)
+    if h < 50 or w < 50 or h > 4000 or w > 4000:
+        return output_img
     
-    if bubble_boundary:
-        bubble_x, bubble_y, bubble_w, bubble_h = bubble_boundary
+    if not boxes_and_text:
+        return output_img
+    
+    # Get overall boundary
+    boundary = get_bubble_boundary(boxes_and_text, output_img.shape, padding=40)
+    
+    if boundary:
+        x, y, w, h = boundary
         
-        # Calculate text wrapping based on bubble width
-        max_chars_per_line = int(bubble_w / 15)  # Characters per line for text wrapping
-        lines = textwrap.wrap(full_translation, width=max_chars_per_line)
+        # White out the area
+        cv2.rectangle(output_img, (x, y), (x + w, y + h), (255, 255, 255), -1)
         
-        # Adjust bubble height based on number of lines
-        line_height = 25
-        padding = 15
-        required_height = len(lines) * line_height + 2 * padding
-        bubble_h = max(bubble_h, required_height)
+        # Draw border
+        cv2.rectangle(output_img, (x, y), (x + w, y + h), (0, 0, 0), 2)
         
-        # Create bubble with rounded corners effect
-        # Add shadow effect
-        shadow_offset = 3
-        cv2.rectangle(output_img, 
-                      (bubble_x + shadow_offset, bubble_y + shadow_offset), 
-                      (bubble_x + bubble_w + shadow_offset, bubble_y + bubble_h + shadow_offset), 
-                      (100, 100, 100), -1)
-        
-        # Draw main bubble
-        cv2.rectangle(output_img, 
-                      (bubble_x, bubble_y), 
-                      (bubble_x + bubble_w, bubble_y + bubble_h), 
-                      (255, 255, 255), -1)
-        
-        # Add border
-        cv2.rectangle(output_img, 
-                      (bubble_x, bubble_y), 
-                      (bubble_x + bubble_w, bubble_y + bubble_h), 
-                      (0, 0, 0), 2)
-        
-        # Note: Removed speech bubble tail to match original manga style
-        
-        # Add text with better styling and center alignment
-        text_x = bubble_x + padding
-        text_y = bubble_y + padding + line_height
-        font_scale = 0.6
-        thickness = 1
-        
-        for i, line in enumerate(lines):
-            # Get text width for center alignment
-            (text_width, _), _ = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-            
-            # Calculate center position for this line
-            center_x = bubble_x + bubble_w // 2
-            line_x = center_x - text_width // 2
-            
-            # Add text shadow for better readability
-            cv2.putText(output_img, line, (line_x + 1, text_y + i * line_height + 1),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (100, 100, 100), thickness, lineType=cv2.LINE_AA)
-            # Main text
-            cv2.putText(output_img, line, (line_x, text_y + i * line_height),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), thickness, lineType=cv2.LINE_AA)
-    else:
-        # Fallback to top-center bubble if no text detected
-        max_chars_per_line = int(w / 20)
-        lines = textwrap.wrap(full_translation, width=max_chars_per_line)
-        
-        line_height = 30
-        padding = 20
-        bubble_height = len(lines) * line_height + 2 * padding
-        bubble_width = min(w - 40, max(len(line) * 15 for line in lines) + 2 * padding)
-        
-        bubble_x = (w - bubble_width) // 2
-        bubble_y = 20
-        
-        # Create fallback bubble
-        cv2.rectangle(output_img, 
-                      (bubble_x, bubble_y), 
-                      (bubble_x + bubble_width, bubble_y + bubble_height), 
-                      (255, 255, 255), -1)
-        cv2.rectangle(output_img, 
-                      (bubble_x, bubble_y), 
-                      (bubble_x + bubble_width, bubble_y + bubble_height), 
-                      (0, 0, 0), 2)
-        
-        text_x = bubble_x + padding
-        text_y = bubble_y + padding + line_height
-        
-        for i, line in enumerate(lines):
-            cv2.putText(output_img, line, (text_x + 1, text_y + i * line_height + 1),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 1, lineType=cv2.LINE_AA)
-            cv2.putText(output_img, line, (text_x, text_y + i * line_height),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 1, lineType=cv2.LINE_AA)
+        # Draw text
+        draw_text_in_bubble(output_img, boundary, full_translation)
+    
+    return output_img
 
+
+def debug_overlay_bubbles(image_np, bubbles):
+    """Draw colored rectangles for each bubble group for visual debugging."""
+    output_img = image_np.copy()
+    colors = [tuple(random.randint(50, 255) for _ in range(3)) for _ in range(len(bubbles))]
+    
+    for idx, bubble in enumerate(bubbles):
+        # Get bubble boundary
+        boundary = get_bubble_boundary(bubble, output_img.shape)
+        if boundary:
+            x, y, w, h = boundary
+            cv2.rectangle(output_img, (x, y), (x + w, y + h), colors[idx], 3)
+            
+            # Add bubble number
+            cv2.putText(
+                output_img, f"Bubble {idx + 1}", (x + 5, y + 20),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, colors[idx], 2
+            )
+    
     return output_img
 
 
@@ -246,35 +246,10 @@ def preprocess(image_bytes: bytes):
     _, thresh = cv2.threshold(np_img, 150, 255, cv2.THRESH_BINARY)
     return thresh
 
+
 def extract_text(image_bytes: bytes, lang_key: str) -> str:
     lang = LANG_MAP.get(lang_key.lower(), "jpn")
     processed_img = preprocess(image_bytes)
     text = pytesseract.image_to_string(processed_img, lang=lang)
     clean = "\n".join(line.strip() for line in text.splitlines() if line.strip())
     return clean or "[No text detected]"
-
-def group_boxes_into_bubbles(boxes_and_text, distance_threshold=60, min_samples=1):
-    """Group OCR boxes into bubbles using DBSCAN clustering for accurate grouping."""
-    if not boxes_and_text:
-        return []
-    # Use the center of each box for clustering
-    centers = [((box["box"][0] + box["box"][2] // 2), (box["box"][1] + box["box"][3] // 2)) for box in boxes_and_text]
-    X = np.array(centers)
-    clustering = DBSCAN(eps=distance_threshold, min_samples=min_samples).fit(X)
-    labels = clustering.labels_
-    bubbles = []
-    for label in set(labels):
-        group = [boxes_and_text[i] for i, l in enumerate(labels) if l == label]
-        if group:
-            bubbles.append(group)
-    return bubbles
-
-def debug_overlay_bubbles(image_np, bubbles):
-    """Draw colored rectangles for each bubble group for visual debugging."""
-    output_img = image_np.copy()
-    colors = [tuple(random.randint(0, 255) for _ in range(3)) for _ in range(len(bubbles))]
-    for idx, bubble in enumerate(bubbles):
-        for item in bubble:
-            x, y, w, h = item["box"]
-            cv2.rectangle(output_img, (x, y), (x + w, y + h), colors[idx], 2)
-    return output_img
