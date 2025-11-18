@@ -1,0 +1,11 @@
+.vscode/
+/backend/__pycache__/
+/backend/ocr/__pycache__/
+/backend/translator/__pycache__/
+/backend/venv/
+/backend/detection/__pycache__/
+/backend/overlay/__pycache__/
+/__pycache__/
+/fonts/
+/raw/
+/TrainSamples/
