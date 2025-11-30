@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-paddlepaddle
-paddleocr
-opencv-python
-pillow
-numpy
-scikit-learn
