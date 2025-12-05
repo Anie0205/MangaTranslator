@@ -5,3 +5,5 @@ backend/comic-text-detector
 backend/.env
 backend/__pycache__/
 backend/assets/
+.env
+Manhwa/
