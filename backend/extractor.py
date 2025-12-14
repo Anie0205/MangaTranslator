@@ -8,8 +8,8 @@ import numpy as np
 from PIL import Image
 
 # --- CONFIGURATION ---
-JSON_SUBFOLDER = "json_output"
-OUTPUT_FILENAME = "batch_text_data.json"
+JSON_SUBFOLDER = "../json_output"
+OUTPUT_FILENAME = "../batch_text_data.json"
 
 def natural_sort_key(s):
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', s)]

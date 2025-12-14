@@ -10,8 +10,8 @@ import matplotlib.pyplot as plt
 from matplotlib.widgets import RectangleSelector
 
 # --- CONFIGURATION ---
-OUTPUT_CLEAN_DIR = "cleaned_output"
-OUTPUT_JSON_DIR = "json_output"
+OUTPUT_CLEAN_DIR = "../cleaned_output"
+OUTPUT_JSON_DIR = "../json_output"
 
 # --- PATH SETUP ---
 current_dir = os.getcwd()
@@ -93,7 +93,6 @@ def manual_editor(image_rgb, auto_boxes, filename):
     return current_boxes
 
 def run_ai_detection(image, detector):
-    """Runs the AI model and returns a list of boxes"""
     image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     results = detector(image_rgb)
     
@@ -128,6 +127,7 @@ def process_single_image(img_path, detector, input_folder, open_editor=True):
     
     clean_out = os.path.join(input_folder, OUTPUT_CLEAN_DIR)
     json_out = os.path.join(input_folder, OUTPUT_JSON_DIR)
+    
     os.makedirs(clean_out, exist_ok=True)
     os.makedirs(json_out, exist_ok=True)
 
@@ -135,7 +135,6 @@ def process_single_image(img_path, detector, input_folder, open_editor=True):
     image = cv2.imread(img_path)
     if image is None: return
 
-    # --- 1. SMART LOAD: CHECK IF JSON EXISTS ---
     json_path = os.path.join(json_out, base_name + ".json")
     boxes = []
     
@@ -143,19 +142,16 @@ def process_single_image(img_path, detector, input_folder, open_editor=True):
         print(" -> Found existing data. Loading instantly...")
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Extract boxes from JSON structure
             for item in data:
                 boxes.append(item['bbox'])
     else:
         print(" -> No data found. Running AI detection...")
         boxes = run_ai_detection(image, detector)
 
-    # --- 2. OPEN EDITOR (OPTIONAL) ---
     if open_editor:
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         boxes = manual_editor(image_rgb, boxes, file_name)
     
-    # --- 3. SAVE & CLEAN ---
     json_data = []
     user_mask = np.zeros(image.shape[:2], dtype=np.uint8)
     
@@ -180,7 +176,31 @@ def process_single_image(img_path, detector, input_folder, open_editor=True):
     cv2.imencode(os.path.splitext(file_name)[1], cleaned)[1].tofile(save_path)
     print(f"✅ Processed {file_name}")
 
-def main_menu(input_folder, model):
+def parse_selection(selection_str, total_files):
+    """
+    Parses strings like "1, 3-5, 8" into a list of indices.
+    """
+    indices = set()
+    parts = selection_str.split(',')
+    
+    for part in parts:
+        part = part.strip()
+        if '-' in part:
+            try:
+                start, end = map(int, part.split('-'))
+                # User is 1-based, we want 0-based
+                for i in range(start, end + 1):
+                    indices.add(i - 1)
+            except ValueError:
+                continue
+        elif part.isdigit():
+            indices.add(int(part) - 1)
+            
+    # Filter valid indices
+    valid_indices = sorted([i for i in indices if 0 <= i < total_files])
+    return valid_indices
+
+def process_folder(input_folder, model):
     extensions = ['*.jpg', '*.jpeg', '*.png', '*.webp']
     image_files = []
     for ext in extensions:
@@ -191,55 +211,89 @@ def main_menu(input_folder, model):
     image_files.sort(key=natural_sort_key)
 
     if not image_files:
-        print("No images found.")
+        print(f"No images found in {os.path.basename(input_folder)}.")
         return
 
+    print(f"\n📂 Folder: {os.path.basename(input_folder)}")
+    print(f"Found {len(image_files)} pages.")
+    
+    # --- PAGE SELECTION MENU ---
+    print("\nHow would you like to proceed?")
+    print(" [A] Process ALL pages automatically")
+    print(" [S] Select specific pages (e.g., 1, 3-5)")
+    
+    mode = input(">> ").strip().upper()
+    
+    files_to_process = []
+    
+    if mode == 'S':
+        print("\n--- Page List ---")
+        for i, f in enumerate(image_files):
+            print(f"{i+1}. {os.path.basename(f)}")
+            
+        sel_str = input("\nEnter page numbers (e.g. '1-3, 5'): ")
+        indices = parse_selection(sel_str, len(image_files))
+        
+        if not indices:
+            print("❌ No valid pages selected.")
+            return
+            
+        files_to_process = [image_files[i] for i in indices]
+        print(f"Selected {len(files_to_process)} pages.")
+        
+    else: # Default to All
+        files_to_process = image_files
+        print("Processing ALL pages.")
+
+    # --- EXECUTION LOOP ---
+    print("\n" + "="*40)
+    print("🚀 STARTING EDITOR")
+    print("="*40)
+    
+    for i, path in enumerate(files_to_process):
+        print(f"\n[{i+1}/{len(files_to_process)}] Opening: {os.path.basename(path)}")
+        process_single_image(path, model, input_folder, open_editor=True)
+    
+    print("\n✅ Queue complete!")
+
+    # --- POST-COMPLETION MENU ---
     while True:
-        print("\n" + "="*40)
-        print(f"📂 Folder: {os.path.basename(input_folder)}")
-        print("Select an action:")
-        print("-" * 20)
+        print("\nOptions:")
+        print(" [O] Open a specific page to re-edit")
+        print(" [Q] Quit / Change Folder")
         
-        for i, path in enumerate(image_files):
-            clean_path = os.path.join(input_folder, OUTPUT_CLEAN_DIR, os.path.basename(path))
-            json_path = os.path.join(input_folder, OUTPUT_JSON_DIR, os.path.splitext(os.path.basename(path))[0] + ".json")
-            
-            status = " "
-            if os.path.exists(clean_path) and os.path.exists(json_path):
-                status = "✅ Done"
-            elif os.path.exists(json_path):
-                status = "⚠️ Scanned" # AI run, but maybe not cleaned/checked
-            
-            print(f"{i+1:2d}. {os.path.basename(path)} \t{status}")
-            
-        print("-" * 20)
-        print("P. PRE-SCAN ALL (Runs AI on everything now so editing is instant)")
-        print("Q. Quit")
-        
-        choice = input("\n>> ").strip().lower()
-        
-        if choice == 'q':
+        choice = input(">> ").strip().upper()
+
+        if choice == 'Q':
             break
-        elif choice == 'p':
-            print("🚀 Pre-scanning all images... (Go grab a coffee)")
-            for path in image_files:
-                # open_editor=False means just run AI and save JSON
-                process_single_image(path, model, input_folder, open_editor=False)
-            print("✨ Pre-scan complete!")
-        elif choice.isdigit():
-            idx = int(choice) - 1
-            if 0 <= idx < len(image_files):
-                process_single_image(image_files[idx], model, input_folder, open_editor=True)
-            else:
-                print("❌ Invalid number.")
-        else:
-            print("❌ Invalid input.")
+        elif choice == 'O':
+            print("\n--- File List ---")
+            for i, path in enumerate(image_files):
+                print(f"{i+1}. {os.path.basename(path)}")
+            
+            try:
+                sel = input("\nEnter page number: ")
+                idx = int(sel) - 1
+                if 0 <= idx < len(image_files):
+                    process_single_image(image_files[idx], model, input_folder, open_editor=True)
+                else:
+                    print("❌ Invalid number.")
+            except ValueError:
+                print("❌ Please enter a valid number.")
 
 if __name__ == "__main__":
     model = load_model()
+    
     while True:
-        print("\n" + "="*40)
-        path = input("Enter FOLDER PATH (or 'q'):\n>> ").strip().replace('"', '').replace("'", "")
-        if path.lower() == 'q': break
-        if os.path.exists(path): main_menu(path, model)
-        else: print("❌ Invalid path.")
+        print("\n" + "="*50)
+        print("   MANUAL CLEANING PIPELINE")
+        print("="*50)
+        path = input("Enter FOLDER PATH (or 'q' to quit):\n>> ").strip().replace('"', '').replace("'", "")
+        
+        if path.lower() == 'q':
+            break
+            
+        if os.path.exists(path):
+            process_folder(path, model)
+        else:
+            print("❌ Invalid path.")
